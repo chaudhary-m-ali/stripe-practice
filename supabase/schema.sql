@@ -18,6 +18,11 @@ create table if not exists public.profiles (
 -- written to be re-runnable.
 alter table public.profiles add column if not exists full_name text;
 
+-- Stamped the moment a free trial starts. Its only job is to answer "has this
+-- account already had its one free trial?" — the subscription row itself gets
+-- deleted-and-recreated over a lifetime, this doesn't.
+alter table public.profiles add column if not exists trial_started_at timestamptz;
+
 -- ---------------------------------------------------------------------------
 -- subscriptions: mirrors the Stripe subscription, kept in sync by the webhook.
 -- This table is the source of truth the app reads when gating /premium.
@@ -36,6 +41,14 @@ create table if not exists public.subscriptions (
   created_at             timestamptz not null default now(),
   updated_at             timestamptz not null default now()
 );
+
+-- When the free trial ends. Null on subscriptions that never had one.
+alter table public.subscriptions add column if not exists trial_end timestamptz;
+
+-- A card-less trial has nothing to charge. This says whether one has been
+-- added since — i.e. whether the trial will convert or be cancelled.
+alter table public.subscriptions
+  add column if not exists has_payment_method boolean not null default false;
 
 create index if not exists subscriptions_user_id_idx on public.subscriptions (user_id);
 create index if not exists subscriptions_customer_idx on public.subscriptions (stripe_customer_id);

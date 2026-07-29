@@ -5,6 +5,8 @@ export type ProfileRow = {
   full_name: string | null;
   email: string | null;
   stripe_customer_id: string | null;
+  /** Set once, the first time this account starts a free trial. */
+  trial_started_at: string | null;
 };
 
 /**
@@ -20,7 +22,7 @@ export async function getProfile(): Promise<ProfileRow | null> {
   const supabase = await createClient();
   const { data, error } = await supabase
     .from("profiles")
-    .select("full_name, email, stripe_customer_id")
+    .select("full_name, email, stripe_customer_id, trial_started_at")
     .eq("id", user.id)
     .maybeSingle();
 

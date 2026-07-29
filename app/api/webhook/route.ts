@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
 import type Stripe from "stripe";
 import { stripe } from "@/lib/stripe";
-import { intervalForPriceId } from "@/lib/plans";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { syncSubscription } from "@/lib/sync-subscription";
 
 /**
  * The single source of truth for subscription state.
@@ -73,6 +72,12 @@ export async function POST(request: Request) {
       case "checkout.session.completed": {
         const session = event.data.object;
 
+        // A card added during a free trial — mode: "setup", no payment.
+        if (session.mode === "setup") {
+          await attachTrialPaymentMethod(session);
+          break;
+        }
+
         if (session.mode !== "subscription" || !session.subscription) {
           console.log(`ℹ️  One-off checkout completed — ${session.id}`);
           break;
@@ -113,86 +118,63 @@ export async function POST(request: Request) {
   return NextResponse.json({ received: true });
 }
 
-/** Write the Stripe subscription into Supabase, creating or updating the row. */
-async function syncSubscription(
-  subscription: Stripe.Subscription,
-  clientReferenceId: string | null,
-) {
-  const admin = createAdminClient();
+/**
+ * Finish "Add payment method" during a free trial.
+ *
+ * The trial subscription was created with no card at all, so Stripe is set to
+ * cancel it on day 14. A Setup session collects a card without charging it;
+ * this makes that card the subscription's default, which is what turns
+ * "cancel at trial end" into "charge at trial end".
+ *
+ * Attaching it to the customer's invoice settings too means the Billing Portal
+ * and any future subscription see the same card.
+ */
+async function attachTrialPaymentMethod(session: Stripe.Checkout.Session) {
+  const setupIntentId =
+    typeof session.setup_intent === "string"
+      ? session.setup_intent
+      : session.setup_intent?.id;
 
   const customerId =
-    typeof subscription.customer === "string"
-      ? subscription.customer
-      : subscription.customer.id;
+    typeof session.customer === "string"
+      ? session.customer
+      : session.customer?.id;
 
-  const userId = await resolveUserId(subscription, clientReferenceId, customerId);
-
-  if (!userId) {
-    // Don't 500 — a subscription created by hand in the Dashboard has no
-    // Supabase user, and retrying forever wouldn't help.
-    console.warn(
-      `[webhook] no Supabase user for subscription ${subscription.id} (customer ${customerId}) — skipping`,
-    );
+  if (!setupIntentId || !customerId) {
+    console.warn(`[webhook] setup session ${session.id} has no intent/customer`);
     return;
   }
 
-  const item = subscription.items.data[0];
-  const priceId = item?.price?.id ?? null;
+  const setupIntent = await stripe.setupIntents.retrieve(setupIntentId);
+  const paymentMethodId =
+    typeof setupIntent.payment_method === "string"
+      ? setupIntent.payment_method
+      : setupIntent.payment_method?.id;
 
-  // In API version 2026-06-24 current_period_end moved OFF the subscription
-  // and onto each subscription item. Most tutorials still read
-  // `subscription.current_period_end`, which is undefined on this version.
-  const periodEnd = item?.current_period_end;
-
-  const { error } = await admin.from("subscriptions").upsert(
-    {
-      user_id: userId,
-      stripe_subscription_id: subscription.id,
-      stripe_customer_id: customerId,
-      status: subscription.status,
-      price_id: priceId,
-      plan: intervalForPriceId(priceId),
-      current_period_end: periodEnd
-        ? new Date(periodEnd * 1000).toISOString()
-        : null,
-      cancel_at_period_end: subscription.cancel_at_period_end,
-    },
-    { onConflict: "stripe_subscription_id" },
-  );
-
-  if (error) {
-    throw new Error(`Supabase upsert failed: ${error.message}`);
+  if (!paymentMethodId) {
+    console.warn(`[webhook] setup intent ${setupIntentId} saved no card`);
+    return;
   }
 
-  console.log(
-    `✅ ${subscription.id} → user ${userId} | status ${subscription.status} | plan ${intervalForPriceId(priceId) ?? "?"}`,
-  );
-}
+  await stripe.customers.update(customerId, {
+    invoice_settings: { default_payment_method: paymentMethodId },
+  });
 
-/**
- * Work out which Supabase user a subscription belongs to. Three fallbacks,
- * because different events carry different fields.
- */
-async function resolveUserId(
-  subscription: Stripe.Subscription,
-  clientReferenceId: string | null,
-  customerId: string,
-): Promise<string | null> {
-  // 1. Set by us in subscription_data.metadata at checkout.
-  const fromMetadata = subscription.metadata?.supabase_user_id;
-  if (fromMetadata) return fromMetadata;
+  // Set on the Setup session by /api/stripe/payment-method.
+  const subscriptionId = session.metadata?.subscription_id;
+  if (!subscriptionId) {
+    console.log(`ℹ️  Card saved for ${customerId}, no subscription to attach`);
+    return;
+  }
 
-  // 2. Set by us as client_reference_id on the Checkout Session.
-  if (clientReferenceId) return clientReferenceId;
+  const subscription = await stripe.subscriptions.update(subscriptionId, {
+    default_payment_method: paymentMethodId,
+  });
 
-  // 3. Look it up by customer id — covers subscriptions changed from the
-  //    Billing Portal, where our metadata isn't on the event.
-  const admin = createAdminClient();
-  const { data } = await admin
-    .from("profiles")
-    .select("id")
-    .eq("stripe_customer_id", customerId)
-    .maybeSingle();
+  // Write has_payment_method through immediately — the account page renders
+  // right after the redirect back, and `customer.subscription.updated` may
+  // not have landed yet.
+  await syncSubscription(subscription, null);
 
-  return (data?.id as string | undefined) ?? null;
+  console.log(`💳 ${paymentMethodId} attached to ${subscriptionId}`);
 }

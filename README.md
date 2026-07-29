@@ -11,10 +11,59 @@ signup    → Supabase auth.users → trigger creates a profiles row
 subscribe → POST /api/stripe/subscribe  (browser sends "monthly" | "yearly", nothing else)
           → getOrCreateStripeCustomer() → checkout.sessions.create({ mode: "subscription" })
           → redirect to checkout.stripe.com
+trial     → POST /api/stripe/trial      (no Checkout, no card)
+          → subscriptions.create({ trial_period_days: 14 }) → status "trialing"
+          → redirect to /premium
 Stripe    → checkout.session.completed → POST /api/webhook
           → service-role upsert into public.subscriptions
 /premium  → reads subscriptions.status → renders or redirects
 ```
+
+## The 14-day free trial
+
+The pricing cards lead with **Start 14-day free trial** on both monthly and
+yearly. No card is collected — the user goes straight from the button to
+`/premium`.
+
+```
+day 0   POST /api/stripe/trial → stripe.subscriptions.create({
+          trial_period_days: 14,
+          trial_settings: { end_behavior: { missing_payment_method: "cancel" } },
+        })                                              → status "trialing"
+        "trialing" is already in ACTIVE_STATUSES, so /premium unlocks.
+
+day 14  no card on file → Stripe cancels the subscription
+        → customer.subscription.updated → webhook writes status "canceled"
+        → /premium locks again, nothing was ever charged
+```
+
+There is **no expiry check of ours anywhere** — no cron, no "is the trial over"
+branch in the page. The trial ends because Stripe cancels it and the webhook
+writes that down, exactly like a cancellation would.
+
+`missing_payment_method` is what makes a card-less trial possible at all.
+Without it Stripe rejects the create call: it can't start a trial when it has
+no idea what to do on the last day.
+
+**Mid-trial the trial button becomes "Add payment method"**, which opens a
+Checkout Session in `mode: "setup"` — the same hosted card form and 3DS, but it
+saves the card instead of charging it. The webhook attaches it to the
+subscription, and on day 14 the trial converts to paid instead of cancelling.
+
+One trial per account, enforced server-side by `profiles.trial_started_at`.
+That column is stamped *before* the Stripe call, so two fast clicks can't
+produce two subscriptions, and handed back if Stripe then fails. `profiles` has
+no update policy, so it can't be cleared from the browser.
+
+State the UI reads (all from Supabase, see [lib/trial.ts](lib/trial.ts)):
+
+| | Pricing card CTA | /premium |
+| --- | --- | --- |
+| Never trialed | Start 14-day free trial | locked |
+| Trialing, no card | Add payment method | open, with days-left banner |
+| Trialing, card added | Trial — card on file | open |
+| Trial ended | Subscribe *(trial used)* | locked, "your trial has ended" |
+| Paid | Current plan | open |
 
 ## Setup
 
@@ -32,6 +81,7 @@ cp .env.local.example .env.local
 | `NEXT_PUBLIC_SUPABASE_URL`           | Supabase → Project Settings → API                         |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY`      | same page — safe in the browser, RLS still applies        |
 | `SUPABASE_SERVICE_ROLE_KEY`          | same page — **bypasses RLS**, webhook only                |
+| `NEXT_PUBLIC_STRIPE_CUSTOMER_PORTAL_URL` | *optional* — [portal settings](https://dashboard.stripe.com/test/settings/billing/portal) → the shareable login link |
 
 `.env*` is gitignored. Never prefix a secret with `NEXT_PUBLIC_`.
 
@@ -75,6 +125,22 @@ One-time, so "Manage billing" works:
 [Stripe → Settings → Billing → Customer portal](https://dashboard.stripe.com/test/settings/billing/portal)
 → activate the test-mode link.
 
+There are two doors into the portal, and they aren't equivalent:
+
+| | `billingPortal.sessions.create()` | The login link |
+| --- | --- | --- |
+| URL | minted per customer, short-lived | one page, shared by everyone |
+| Who is it? | Stripe already knows | customer types their email |
+| Getting in | opens immediately | wait for a magic link email |
+| Needs | portal configured via API/dashboard | just the link |
+
+"Manage billing" always tries the API session first — the signed-in user is
+already identified, so making them prove it by email again is a downgrade. Set
+`NEXT_PUBLIC_STRIPE_CUSTOMER_PORTAL_URL` and the login link becomes the
+fallback: if the session call fails (test-mode portal never configured, most
+often), the button explains the extra step and offers the link instead of
+showing an error.
+
 ### 6. Run
 
 ```bash
@@ -104,6 +170,24 @@ Both live in [lib/plans.ts](lib/plans.ts). Free is the absence of a row in
 5. **Manage billing** → cancel → `customer.subscription.updated` fires →
    `/account` flips to "Access until …" with no code of ours in between
 
+### …and the trial
+
+1. A fresh account → **Start 14-day free trial** → straight to `/premium`, no
+   card form anywhere
+2. `/account` shows `trialing`, *Card on file: no*, and the end date
+3. Don't want to wait 14 days? End it now — the subscription id is on
+   `/account`:
+
+   ```bash
+   stripe subscriptions update sub_xxx --trial-end now
+   ```
+
+   `stripe listen` prints `customer.subscription.updated`, the row flips to
+   `canceled`, and `/premium` locks itself. No invoice, no charge.
+4. Or start another trial, hit **Add payment method**, pay with
+   `4242 4242 4242 4242` (nothing is charged), then run the same command — this
+   time it converts to `active` and bills.
+
 ## Test cards
 
 | Number                | What happens                        |
@@ -121,11 +205,13 @@ Any future expiry, any 3-digit CVC. [Full list](https://docs.stripe.com/testing)
 proxy.ts                          session refresh + redirect signed-out users
 supabase/schema.sql               tables, RLS, triggers
 
-lib/plans.ts                      price ids, which statuses unlock premium
+lib/plans.ts                      price ids, trial length, unlocking statuses
 lib/profile.ts                    read the current user's name/email/customer id
 lib/stripe.ts                     server Stripe client (secret key)
 lib/stripe-customer.ts            one Stripe customer per Supabase user
 lib/subscription.ts               read the current user's plan
+lib/trial.ts                      trial state: active / eligible / expired
+lib/sync-subscription.ts          Stripe subscription → Supabase row
 lib/supabase/{server,client,admin}.ts
 
 app/page.tsx                      home + pricing
@@ -133,6 +219,8 @@ app/premium/page.tsx              the gated page
 app/account/page.tsx              status + manage billing
 app/login/                        sign in / sign up (Server Actions)
 app/api/stripe/subscribe/route.ts creates the subscription Checkout Session
+app/api/stripe/trial/route.ts     starts the card-less 14-day trial
+app/api/stripe/payment-method/    Setup session to add a card mid-trial
 app/api/stripe/portal/route.ts    opens the Stripe billing portal
 app/api/webhook/route.ts          syncs Stripe → Supabase
 ```
@@ -152,6 +240,17 @@ instead of `"subscription"`:
 - **The database is the gate, Stripe is the source.** `/premium` reads one
   indexed row instead of calling Stripe on every request; the webhook is what
   keeps that row true.
+- **A trial with no card still has to be able to end.** That's what
+  `trial_settings.end_behavior.missing_payment_method` is for. Set it and
+  Stripe owns the expiry; skip it and you're writing a cron job that scans for
+  overdue trials — and getting it wrong on the day your worker is down.
+- **Checkout is for collecting cards.** A free trial collects nothing, so it
+  doesn't go through Checkout at all — the subscription is created directly and
+  the user is on `/premium` in one hop. `mode: "setup"` is the reverse: a card
+  form with no charge.
+- **Give the trial away before you create it.** `trial_started_at` is written
+  before the Stripe call and rolled back if it fails. Writing it after would
+  let a double-click buy two subscriptions.
 - **The redirect is not the event.** Renewals, failed cards and cancellations
   happen months later with no browser open. Only the webhook sees them.
 - **`subscriptions` has no write policy.** Users can read their own row and

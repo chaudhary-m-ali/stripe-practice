@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { AddPaymentMethodButton } from "@/app/components/add-payment-method-button";
 import { ManageBillingButton } from "@/app/components/manage-billing-button";
 import { Shell } from "@/app/components/shell";
 import { isPremiumStatus, PREMIUM_PLANS } from "@/lib/plans";
 import { getProfile } from "@/lib/profile";
 import { getCurrentUser } from "@/lib/supabase/server";
 import { getSubscription } from "@/lib/subscription";
+import { formatTrialEnd, trialState } from "@/lib/trial";
 
 const STATUS_HELP: Record<string, string> = {
   active: "Paid and current.",
@@ -21,9 +23,9 @@ const STATUS_HELP: Record<string, string> = {
 export default async function AccountPage({
   searchParams,
 }: {
-  searchParams: Promise<{ checkout?: string }>;
+  searchParams: Promise<{ checkout?: string; card?: string }>;
 }) {
-  const { checkout } = await searchParams;
+  const { checkout, card } = await searchParams;
 
   const user = await getCurrentUser();
   if (!user) redirect("/login?next=/account");
@@ -33,6 +35,7 @@ export default async function AccountPage({
     getSubscription(),
   ]);
   const premium = isPremiumStatus(subscription?.status);
+  const trial = trialState(profile, subscription, true);
 
   const periodEnd = subscription?.current_period_end
     ? new Date(subscription.current_period_end).toLocaleDateString("en-US", {
@@ -49,18 +52,69 @@ export default async function AccountPage({
         </p>
       ) : null}
 
+      {card === "added" ? (
+        <p className="mb-6 rounded-lg border border-green-300 bg-green-50 px-4 py-3 text-sm text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-200">
+          Card saved — nothing charged yet. The first payment goes out when the
+          trial ends.
+        </p>
+      ) : null}
+
+      {trial.active ? (
+        <div className="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-5 dark:border-amber-900 dark:bg-amber-950">
+          <p className="font-medium text-amber-900 dark:text-amber-200">
+            Free trial — {trial.daysLeft}{" "}
+            {trial.daysLeft === 1 ? "day" : "days"} left
+          </p>
+          <p className="mt-1 text-sm text-amber-800 dark:text-amber-300">
+            {trial.needsPaymentMethod
+              ? `No card on file. Stripe cancels this subscription on ${formatTrialEnd(trial.endsAt)} and premium locks — add a card to convert it to a paid plan instead.`
+              : `Converts to a paid ${subscription?.plan ?? ""} plan on ${formatTrialEnd(trial.endsAt)}. Cancel before then and you won't be charged.`}
+          </p>
+          {trial.needsPaymentMethod ? (
+            <div className="mt-4 max-w-xs">
+              <AddPaymentMethodButton />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {trial.expired ? (
+        <p className="mb-6 rounded-lg border border-zinc-300 bg-zinc-50 px-4 py-3 text-sm text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400">
+          Your free trial has ended and premium is locked. You were never
+          charged — this account&apos;s one trial is used up, so continuing
+          means subscribing.
+        </p>
+      ) : null}
+
       <div className="rounded-xl border border-zinc-200 dark:border-zinc-800">
         <dl className="divide-y divide-zinc-200 text-sm dark:divide-zinc-800">
           {[
             ["Name", profile?.full_name ?? "—"],
             ["Email", profile?.email ?? user.email ?? "—"],
-            ["Plan", premium ? `Premium (${subscription?.plan ?? "?"})` : "Free"],
+            [
+              "Plan",
+              trial.active
+                ? `Premium trial (${subscription?.plan ?? "?"})`
+                : premium
+                  ? `Premium (${subscription?.plan ?? "?"})`
+                  : "Free",
+            ],
             ["Status", subscription?.status ?? "no subscription"],
             [
               subscription?.cancel_at_period_end
                 ? "Access until"
-                : "Next renewal",
+                : trial.active
+                  ? "Trial ends"
+                  : "Next renewal",
               periodEnd ?? "—",
+            ],
+            [
+              "Card on file",
+              subscription
+                ? subscription.has_payment_method
+                  ? "yes"
+                  : "no"
+                : "—",
             ],
             [
               "Price",
@@ -90,7 +144,7 @@ export default async function AccountPage({
       <div className="mt-8 flex flex-wrap items-center gap-4">
         {premium ? (
           <>
-            <ManageBillingButton />
+            <ManageBillingButton email={profile?.email ?? user.email} />
             <Link
               href="/premium"
               className="text-sm underline text-zinc-600 dark:text-zinc-400"

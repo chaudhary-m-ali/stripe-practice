@@ -34,7 +34,11 @@ export async function Nav() {
         ) : null}
 
         <div className="ml-auto flex items-center gap-4">
-          {premium ? (
+          {subscription?.status === "trialing" ? (
+            <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+              Trial
+            </span>
+          ) : premium ? (
             <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
               Premium
             </span>

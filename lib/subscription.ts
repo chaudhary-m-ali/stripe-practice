@@ -8,6 +8,8 @@ export type SubscriptionRow = {
   price_id: string | null;
   plan: BillingInterval | null;
   current_period_end: string | null;
+  trial_end: string | null;
+  has_payment_method: boolean;
   cancel_at_period_end: boolean;
 };
 
@@ -27,7 +29,7 @@ export async function getSubscription(): Promise<SubscriptionRow | null> {
   const { data, error } = await supabase
     .from("subscriptions")
     .select(
-      "stripe_subscription_id, stripe_customer_id, status, price_id, plan, current_period_end, cancel_at_period_end",
+      "stripe_subscription_id, stripe_customer_id, status, price_id, plan, current_period_end, trial_end, has_payment_method, cancel_at_period_end",
     )
     .eq("user_id", user.id)
     .order("created_at", { ascending: false })

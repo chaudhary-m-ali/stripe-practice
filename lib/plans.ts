@@ -34,6 +34,16 @@ export const PREMIUM_PLANS: Record<BillingInterval, PremiumPlan> = {
   },
 };
 
+/**
+ * Length of the card-less free trial.
+ *
+ * Nothing is collected up front, so the trial has to be able to end itself:
+ * the subscription is created with
+ * `trial_settings.end_behavior.missing_payment_method: "cancel"`, and on day
+ * 14 Stripe cancels it. The webhook writes `canceled`, and /premium locks.
+ */
+export const TRIAL_DAYS = 14;
+
 export const FREE_FEATURES = [
   "Browse the home page",
   "Create an account",

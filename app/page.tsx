@@ -1,5 +1,7 @@
 import Link from "next/link";
+import { AddPaymentMethodButton } from "@/app/components/add-payment-method-button";
 import { SetupCheck } from "@/app/components/setup-check";
+import { StartTrialButton } from "@/app/components/start-trial-button";
 import { SubscribeButton } from "@/app/components/subscribe-button";
 import {
   formatPrice,
@@ -7,14 +9,24 @@ import {
   isPremiumStatus,
   PREMIUM_FEATURES,
   PREMIUM_PLANS,
+  TRIAL_DAYS,
 } from "@/lib/plans";
+import { getProfile } from "@/lib/profile";
 import { getCurrentUser } from "@/lib/supabase/server";
 import { getSubscription } from "@/lib/subscription";
+import { formatTrialEnd, trialState } from "@/lib/trial";
 
 export default async function Home() {
   const user = await getCurrentUser();
-  const subscription = user ? await getSubscription() : null;
+  const [profile, subscription] = user
+    ? await Promise.all([getProfile(), getSubscription()])
+    : [null, null];
   const premium = isPremiumStatus(subscription?.status);
+  const trial = trialState(profile, subscription, !!user);
+
+  // Signed-out visitors get the trial button too — it sends them to sign up
+  // first. Eligibility is re-checked on the server when they come back.
+  const canStartTrial = !user || trial.eligible;
 
   return (
     <div className="flex flex-1 flex-col items-center px-6 py-16">
@@ -33,7 +45,33 @@ export default async function Home() {
           Nothing is ever charged — these are test keys.
         </p>
 
-        {premium ? (
+        {trial.active ? (
+          <div className="mt-8 rounded-xl border border-amber-300 bg-amber-50 p-5 dark:border-amber-900 dark:bg-amber-950">
+            <p className="font-medium text-amber-900 dark:text-amber-200">
+              Free trial — {trial.daysLeft}{" "}
+              {trial.daysLeft === 1 ? "day" : "days"} left
+            </p>
+            <p className="mt-1 text-sm text-amber-800 dark:text-amber-300">
+              {trial.needsPaymentMethod
+                ? `Premium is unlocked until ${formatTrialEnd(trial.endsAt)}. No card on file, so access ends that day unless you add one.`
+                : `Card on file — this becomes a paid ${subscription?.plan ?? ""} subscription on ${formatTrialEnd(trial.endsAt)}.`}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-4 text-sm">
+              <Link
+                href="/premium"
+                className="underline text-amber-900 dark:text-amber-200"
+              >
+                Go to the premium page
+              </Link>
+              <Link
+                href="/account"
+                className="underline text-amber-900 dark:text-amber-200"
+              >
+                Manage subscription
+              </Link>
+            </div>
+          </div>
+        ) : premium ? (
           <div className="mt-8 rounded-xl border border-green-300 bg-green-50 p-5 dark:border-green-900 dark:bg-green-950">
             <p className="font-medium text-green-900 dark:text-green-200">
               You&apos;re on Premium ({subscription?.plan ?? "unknown"} billing)
@@ -52,6 +90,14 @@ export default async function Home() {
                 Manage subscription
               </Link>
             </div>
+          </div>
+        ) : trial.expired ? (
+          <div className="mt-8 rounded-xl border border-zinc-300 bg-zinc-50 p-5 dark:border-zinc-700 dark:bg-zinc-900">
+            <p className="font-medium">Your free trial has ended</p>
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+              The premium page is locked again. Pick a plan below to get it
+              back — there&apos;s one trial per account.
+            </p>
           </div>
         ) : null}
 
@@ -72,16 +118,25 @@ export default async function Home() {
               ))}
             </ul>
             <div className="mt-6">
-              {user ? (
+              {user && premium ? (
+                <Link
+                  href="/account"
+                  className="block rounded-full border border-zinc-200 px-5 py-2.5 text-center text-sm text-zinc-500 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-900"
+                >
+                  {trial.active ? "Cancel the trial" : "Cancel from account"}
+                </Link>
+              ) : user ? (
                 <p className="rounded-full border border-zinc-200 px-5 py-2.5 text-center text-sm text-zinc-500 dark:border-zinc-800">
                   Your current plan
                 </p>
               ) : (
+                // Signed out: the button names the plan, not the paperwork.
+                // Login is a step on the way, so it's a destination, not a label.
                 <Link
-                  href="/login"
+                  href={`/login?next=${encodeURIComponent("/")}`}
                   className="block rounded-full border border-zinc-300 px-5 py-2.5 text-center text-sm font-medium transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900"
                 >
-                  Create account
+                  Free plan
                 </Link>
               )}
             </div>
@@ -115,6 +170,11 @@ export default async function Home() {
                   {formatPrice(plan.amount, plan.currency)}
                 </p>
                 <p className="text-sm text-zinc-500">{plan.label}</p>
+                {canStartTrial ? (
+                  <p className="mt-1 text-xs font-medium text-indigo-600 dark:text-indigo-400">
+                    {TRIAL_DAYS}-day free trial · no card required
+                  </p>
+                ) : null}
                 <ul className="mt-5 flex-1 space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
                   {PREMIUM_FEATURES.map((feature) => (
                     <li key={feature}>· {feature}</li>
@@ -126,7 +186,27 @@ export default async function Home() {
                   ) : null}
                 </ul>
                 <div className="mt-6">
-                  {isCurrent ? (
+                  {/* On trial, on THIS plan — the trial button has become the
+                      "add a card" button, because that's the only thing left
+                      to do before day 14. */}
+                  {trial.active && isCurrent ? (
+                    trial.needsPaymentMethod ? (
+                      <>
+                        <AddPaymentMethodButton />
+                        <p className="mt-2 text-center text-xs text-zinc-500">
+                          Trial ends {formatTrialEnd(trial.endsAt)} · billed
+                          only from then
+                        </p>
+                      </>
+                    ) : (
+                      <Link
+                        href="/account"
+                        className="block rounded-full bg-green-600 px-5 py-2.5 text-center text-sm font-medium text-white"
+                      >
+                        Trial — card on file
+                      </Link>
+                    )
+                  ) : isCurrent ? (
                     <Link
                       href="/account"
                       className="block rounded-full bg-green-600 px-5 py-2.5 text-center text-sm font-medium text-white"
@@ -140,14 +220,29 @@ export default async function Home() {
                     >
                       Switch to {interval}
                     </Link>
-                  ) : (
-                    <SubscribeButton
+                  ) : canStartTrial ? (
+                    <StartTrialButton
                       interval={interval}
                       signedIn={!!user}
                       className="bg-indigo-600 text-white hover:bg-indigo-500"
                     >
-                      {user ? `Subscribe ${interval}` : "Sign in to subscribe"}
-                    </SubscribeButton>
+                      Start {TRIAL_DAYS}-day free trial
+                    </StartTrialButton>
+                  ) : (
+                    <>
+                      <SubscribeButton
+                        interval={interval}
+                        signedIn={!!user}
+                        className="bg-indigo-600 text-white hover:bg-indigo-500"
+                      >
+                        Subscribe {interval}
+                      </SubscribeButton>
+                      {trial.used ? (
+                        <p className="mt-2 text-center text-xs text-zinc-500">
+                          Free trial already used on this account
+                        </p>
+                      ) : null}
+                    </>
                   )}
                 </div>
               </div>
@@ -169,6 +264,25 @@ export default async function Home() {
           Renewals, failed cards and cancellations arrive months later with no
           browser open — the webhook is the only thing that sees them, which is
           why access is read from the database and not from the redirect.
+        </p>
+
+        <h2 className="mt-14 text-2xl font-semibold">
+          How the trial ends itself
+        </h2>
+        <ol className="mt-4 space-y-1 border-l border-zinc-200 pl-4 font-mono text-xs text-zinc-500 dark:border-zinc-800">
+          <li>POST /api/stripe/trial → subscriptions.create, no Checkout</li>
+          <li>trial_period_days: {TRIAL_DAYS}, no payment method collected</li>
+          <li>trial_settings.end_behavior.missing_payment_method: cancel</li>
+          <li>status &quot;trialing&quot; → already in ACTIVE_STATUSES → /premium opens</li>
+          <li>day {TRIAL_DAYS}, no card → Stripe cancels → webhook writes canceled</li>
+          <li>/premium reads canceled → locked, and nothing was charged</li>
+        </ol>
+        <p className="mt-4 max-w-xl text-sm text-zinc-500">
+          No cron job, no expiry check of our own — the same webhook that
+          handles payments handles the trial running out. Adding a card mid-trial
+          uses a Setup session (<code className="font-mono">mode: &quot;setup&quot;</code>),
+          which saves the card without charging it, and the trial converts on
+          its last day instead of being cancelled.
         </p>
 
         {/* ------------------------------- one-off demos ------------------- */}

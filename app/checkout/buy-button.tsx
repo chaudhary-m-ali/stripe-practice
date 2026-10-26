@@ -1,9 +1,11 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { formatAmount, type Product } from "@/lib/products";
 
 export function BuyButton({ product }: { product: Product }) {
+  const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -16,6 +18,14 @@ export function BuyButton({ product }: { product: Product }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ productId: product.id }),
       });
+
+      // The session expired while this page sat open. Orders are written
+      // against a user id, so there's nothing to do but sign in again.
+      if (res.status === 401) {
+        router.push(`/login?next=${encodeURIComponent("/checkout")}`);
+        return;
+      }
+
       const data = (await res.json()) as { url?: string; error?: string };
 
       if (!res.ok || !data.url) {

@@ -67,6 +67,9 @@ export default async function PaymentStatusPage({
       </div>
 
       <div className="mt-8 flex gap-4">
+        <Link href="/orders" className="text-sm underline">
+          Your orders
+        </Link>
         <Link href="/elements" className="text-sm underline">
           Try again
         </Link>

@@ -25,12 +25,20 @@ export async function Nav() {
         </Link>
 
         {user ? (
-          <Link
-            href="/account"
-            className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            Account
-          </Link>
+          <>
+            <Link
+              href="/orders"
+              className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+            >
+              Orders
+            </Link>
+            <Link
+              href="/account"
+              className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+            >
+              Account
+            </Link>
+          </>
         ) : null}
 
         <div className="ml-auto flex items-center gap-4">

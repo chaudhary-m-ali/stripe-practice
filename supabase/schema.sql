@@ -54,6 +54,41 @@ create index if not exists subscriptions_user_id_idx on public.subscriptions (us
 create index if not exists subscriptions_customer_idx on public.subscriptions (stripe_customer_id);
 
 -- ---------------------------------------------------------------------------
+-- orders: one row per one-off purchase (mode: "payment"), written by the same
+-- webhook. Separate from subscriptions because it is a different thing with a
+-- different lifecycle — a subscription is a state that changes over months, an
+-- order is an event that happened once.
+--
+-- stripe_payment_intent_id is UNIQUE, and that is the whole idempotency story.
+-- Stripe retries webhook deliveries, and a hosted Checkout fires two different
+-- events for a single purchase, so "insert an order" would ship the goods
+-- twice. Upserting on this column cannot.
+-- ---------------------------------------------------------------------------
+create table if not exists public.orders (
+  id                         uuid primary key default gen_random_uuid(),
+  user_id                    uuid not null references auth.users (id) on delete cascade,
+  stripe_payment_intent_id   text not null unique,
+  stripe_checkout_session_id text,
+  email                      text,
+  -- Snapshot of what was bought, NOT a foreign key to a catalog. If the price
+  -- of coffee changes next month, this order must still say what was paid.
+  product_id                 text not null,
+  product_name               text,
+  amount                     integer not null,
+  currency                   text not null,
+  -- paid | processing | failed | refunded — deliberately not the same
+  -- vocabulary as subscriptions.status.
+  status                     text not null,
+  -- 'checkout' (hosted page) or 'elements' (embedded form), so the demo can
+  -- show which flow produced the row.
+  source                     text,
+  created_at                 timestamptz not null default now(),
+  updated_at                 timestamptz not null default now()
+);
+
+create index if not exists orders_user_id_idx on public.orders (user_id);
+
+-- ---------------------------------------------------------------------------
 -- Row Level Security.
 --
 -- Read-only for the owner. There are deliberately NO insert/update/delete
@@ -63,6 +98,7 @@ create index if not exists subscriptions_customer_idx on public.subscriptions (s
 -- ---------------------------------------------------------------------------
 alter table public.profiles      enable row level security;
 alter table public.subscriptions enable row level security;
+alter table public.orders        enable row level security;
 
 drop policy if exists "read own profile" on public.profiles;
 create policy "read own profile"
@@ -72,6 +108,11 @@ create policy "read own profile"
 drop policy if exists "read own subscriptions" on public.subscriptions;
 create policy "read own subscriptions"
   on public.subscriptions for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "read own orders" on public.orders;
+create policy "read own orders"
+  on public.orders for select
   using (auth.uid() = user_id);
 
 -- ---------------------------------------------------------------------------
@@ -121,4 +162,9 @@ $$;
 drop trigger if exists subscriptions_touch_updated_at on public.subscriptions;
 create trigger subscriptions_touch_updated_at
   before update on public.subscriptions
+  for each row execute function public.touch_updated_at();
+
+drop trigger if exists orders_touch_updated_at on public.orders;
+create trigger orders_touch_updated_at
+  before update on public.orders
   for each row execute function public.touch_updated_at();

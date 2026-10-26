@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import type Stripe from "stripe";
+import {
+  markOrderRefunded,
+  recordOrderFromPaymentIntent,
+  recordOrderFromSession,
+} from "@/lib/fulfil-order";
 import { stripe } from "@/lib/stripe";
 import { syncSubscription } from "@/lib/sync-subscription";
 
@@ -65,6 +70,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: message }, { status: 400 });
   }
 
+  // One line per delivery, before any branching — so the log shows every event
+  // Stripe sent, including the ones that fall through to `default`.
+  console.log(
+    `\n🔔 [webhook] ${event.type} — event ${event.id}, ${event.livemode ? "LIVE" : "test"} mode`,
+  );
+
   try {
     switch (event.type) {
       // Fires the moment someone finishes Checkout. The Subscription object is
@@ -72,14 +83,37 @@ export async function POST(request: Request) {
       case "checkout.session.completed": {
         const session = event.data.object;
 
+        console.log(
+          `   ↳ Checkout finished. session=${session.id} mode=${session.mode} status=${session.status}` +
+            ` payment_status=${session.payment_status} amount_total=${session.amount_total}` +
+            ` currency=${session.currency} customer=${
+              typeof session.customer === "string"
+                ? session.customer
+                : (session.customer?.id ?? "none")
+            } client_reference_id=${session.client_reference_id ?? "none"}`,
+        );
+
         // A card added during a free trial — mode: "setup", no payment.
         if (session.mode === "setup") {
+          console.log(
+            `   ↳ mode=setup → no charge; a card was collected during a trial. Attaching it as the default payment method.`,
+          );
           await attachTrialPaymentMethod(session);
           break;
         }
 
+        // A one-off purchase — mode: "payment". THIS is where an order gets
+        // fulfilled, not on the /success redirect, which the buyer can close.
+        if (session.mode === "payment") {
+          console.log(
+            `   ↳ mode=payment → one-off purchase. Recording the order from the session (this is the real fulfilment point, not the /success redirect).`,
+          );
+          await recordOrderFromSession(session);
+          break;
+        }
+
         if (session.mode !== "subscription" || !session.subscription) {
-          console.log(`ℹ️  One-off checkout completed — ${session.id}`);
+          console.log(`ℹ️  Checkout session ${session.id} has nothing to sync`);
           break;
         }
 
@@ -88,8 +122,16 @@ export async function POST(request: Request) {
             ? session.subscription
             : session.subscription.id;
 
+        console.log(
+          `   ↳ mode=subscription → the session only carries the subscription id (${subscriptionId}), so fetching the full object from Stripe before syncing.`,
+        );
+
         const subscription =
           await stripe.subscriptions.retrieve(subscriptionId);
+
+        console.log(
+          `   ↳ fetched subscription ${subscription.id} status=${subscription.status} → writing it to our database`,
+        );
 
         await syncSubscription(subscription, session.client_reference_id);
         break;
@@ -99,12 +141,107 @@ export async function POST(request: Request) {
       case "customer.subscription.created":
       case "customer.subscription.updated":
       case "customer.subscription.deleted": {
-        await syncSubscription(event.data.object, null);
+        const subscription = event.data.object;
+
+        console.log(
+          `   ↳ Subscription lifecycle event. subscription=${subscription.id}` +
+            ` status=${subscription.status}` +
+            ` cancel_at_period_end=${subscription.cancel_at_period_end}` +
+            ` customer=${
+              typeof subscription.customer === "string"
+                ? subscription.customer
+                : subscription.customer.id
+            }` +
+            ` price=${subscription.items.data[0]?.price.id ?? "none"}`,
+        );
+        console.log(
+          `   ↳ Overwriting our stored copy of this subscription so the account page matches Stripe. Renewals, plan switches, card failures and cancellations all arrive here — days or months later, with no browser involved.`,
+        );
+
+        await syncSubscription(subscription, null);
+        break;
+      }
+
+      // The embedded Payment Element never creates a Checkout Session, so the
+      // event above never fires for it — this is its only signal.
+      //
+      // It ALSO fires for hosted Checkout payments, which means one purchase
+      // there produces two events. Both write the same row keyed on the same
+      // PaymentIntent id, in whichever order they arrive, so the duplicate is
+      // harmless. That is the entire reason for the unique constraint.
+      case "payment_intent.succeeded": {
+        const intent = event.data.object;
+
+        console.log(
+          `   ↳ Payment succeeded. payment_intent=${intent.id}` +
+            ` amount=${intent.amount} ${intent.currency}` +
+            ` customer=${
+              typeof intent.customer === "string"
+                ? intent.customer
+                : (intent.customer?.id ?? "none")
+            }` +
+            ` metadata=${JSON.stringify(intent.metadata)}`,
+        );
+        console.log(
+          `   ↳ Recording the order as "paid", keyed on the PaymentIntent id. A hosted Checkout purchase also fires checkout.session.completed, so this row may be written twice — the unique constraint makes that harmless.`,
+        );
+
+        await recordOrderFromPaymentIntent(intent, "paid");
+        break;
+      }
+
+      // Test card 4000 0000 0000 9995 lands here.
+      case "payment_intent.payment_failed": {
+        const intent = event.data.object;
+
+        console.log(
+          `   ↳ Payment failed. payment_intent=${intent.id}` +
+            ` amount=${intent.amount} ${intent.currency}` +
+            ` code=${intent.last_payment_error?.code ?? "none"}` +
+            ` decline_code=${intent.last_payment_error?.decline_code ?? "none"}` +
+            ` message=${intent.last_payment_error?.message ?? "none"}`,
+        );
+        console.log(
+          `   ↳ Recording the order as "failed" so the buyer sees why, instead of the attempt vanishing.`,
+        );
+
+        await recordOrderFromPaymentIntent(intent, "failed");
+        break;
+      }
+
+      // Refund one from the Dashboard and watch /orders change with no code of
+      // ours running in between — the same argument as subscription renewals.
+      case "charge.refunded": {
+        const charge = event.data.object;
+        const paymentIntentId =
+          typeof charge.payment_intent === "string"
+            ? charge.payment_intent
+            : charge.payment_intent?.id;
+
+        console.log(
+          `   ↳ Charge refunded. charge=${charge.id}` +
+            ` amount=${charge.amount} refunded=${charge.amount_refunded} ${charge.currency}` +
+            ` fully_refunded=${charge.refunded}` +
+            ` payment_intent=${paymentIntentId ?? "none"}`,
+        );
+
+        if (paymentIntentId) {
+          console.log(
+            `   ↳ Marking our order refunded. Triggered from the Dashboard with none of our code in between — the same argument as subscription renewals.`,
+          );
+          await markOrderRefunded(paymentIntentId);
+        } else {
+          console.log(
+            `   ↳ No PaymentIntent on this charge, so there is no order row to match. Ignoring.`,
+          );
+        }
         break;
       }
 
       default:
-        console.log(`ℹ️  Unhandled event type: ${event.type}`);
+        console.log(
+          `   ↳ ℹ️  Unhandled event type: ${event.type}. Nothing in this app reacts to it — Stripe sends it because the endpoint is subscribed to it (or \`stripe listen\` forwards everything). Still answering 2xx so Stripe does not retry.`,
+        );
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Handler failed";
@@ -113,6 +250,8 @@ export async function POST(request: Request) {
     // losing the event when the database is briefly unreachable.
     return NextResponse.json({ error: message }, { status: 500 });
   }
+
+  console.log(`✅ [webhook] ${event.type} handled — answering 200`);
 
   // Always 2xx quickly, or Stripe will retry the delivery.
   return NextResponse.json({ received: true });
@@ -145,6 +284,10 @@ async function attachTrialPaymentMethod(session: Stripe.Checkout.Session) {
     return;
   }
 
+  console.log(
+    `      • setup session ${session.id} → setup_intent=${setupIntentId} customer=${customerId}; fetching the intent to find which card was saved`,
+  );
+
   const setupIntent = await stripe.setupIntents.retrieve(setupIntentId);
   const paymentMethodId =
     typeof setupIntent.payment_method === "string"
@@ -156,6 +299,10 @@ async function attachTrialPaymentMethod(session: Stripe.Checkout.Session) {
     return;
   }
 
+  console.log(
+    `      • card ${paymentMethodId} saved; setting it as the customer's invoice default so the Billing Portal and future subscriptions reuse it`,
+  );
+
   await stripe.customers.update(customerId, {
     invoice_settings: { default_payment_method: paymentMethodId },
   });
@@ -166,6 +313,10 @@ async function attachTrialPaymentMethod(session: Stripe.Checkout.Session) {
     console.log(`ℹ️  Card saved for ${customerId}, no subscription to attach`);
     return;
   }
+
+  console.log(
+    `      • attaching it to subscription ${subscriptionId} as the default — this is what turns "cancel at trial end" into "charge at trial end"`,
+  );
 
   const subscription = await stripe.subscriptions.update(subscriptionId, {
     default_payment_method: paymentMethodId,

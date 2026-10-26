@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   Elements,
@@ -13,6 +15,7 @@ import { getStripe } from "@/lib/stripe-client";
 const stripePromise = getStripe();
 
 export function PaymentForm({ productId }: { productId: string }) {
+  const router = useRouter();
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,6 +30,13 @@ export function PaymentForm({ productId }: { productId: string }) {
       body: JSON.stringify({ productId }),
     })
       .then(async (res) => {
+        // The intent is stamped with the buyer's user id, so a signed-out
+        // request has nothing to stamp it with.
+        if (res.status === 401) {
+          router.push(`/login?next=${encodeURIComponent("/elements")}`);
+          return;
+        }
+
         const data = (await res.json()) as {
           clientSecret?: string;
           error?: string;
@@ -45,7 +55,7 @@ export function PaymentForm({ productId }: { productId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [productId]);
+  }, [productId, router]);
 
   if (error) {
     return (
@@ -129,15 +139,21 @@ function CheckoutForm() {
       </button>
 
       {message ? (
-        <p
+        <div
           className={`rounded-lg border px-4 py-3 text-sm ${
             succeeded
               ? "border-green-300 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950 dark:text-green-200"
               : "border-red-300 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200"
           }`}
         >
-          {message}
-        </p>
+          <p>{message}</p>
+          {succeeded ? (
+            // The row appears via payment_intent.succeeded, not from here.
+            <Link href="/orders" className="mt-1 inline-block underline">
+              See it in your orders
+            </Link>
+          ) : null}
+        </div>
       ) : null}
     </form>
   );

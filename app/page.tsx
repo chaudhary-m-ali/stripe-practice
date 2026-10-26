@@ -290,9 +290,12 @@ export default async function Home() {
           One-off payment demos
         </h2>
         <p className="mt-2 max-w-xl text-zinc-600 dark:text-zinc-400">
-          Separate from the subscription flow above — no account needed. These
-          use <code className="font-mono text-sm">mode: &quot;payment&quot;</code>{" "}
-          instead of <code className="font-mono text-sm">&quot;subscription&quot;</code>.
+          Separate from the subscription flow above — these use{" "}
+          <code className="font-mono text-sm">mode: &quot;payment&quot;</code>{" "}
+          instead of{" "}
+          <code className="font-mono text-sm">&quot;subscription&quot;</code>.
+          Buying writes a row to <code className="font-mono text-sm">orders</code>,
+          so you need to be signed in for it to belong to someone.
         </p>
         <div className="mt-4 flex flex-col gap-3 sm:flex-row">
           <Link
@@ -314,6 +317,28 @@ export default async function Home() {
             </p>
           </Link>
         </div>
+
+        <ol className="mt-6 space-y-1 border-l border-zinc-200 pl-4 font-mono text-xs text-zinc-500 dark:border-zinc-800">
+          <li>buy → checkout.sessions.create / paymentIntents.create</li>
+          <li>both stamped with supabase_user_id + productId</li>
+          <li>Stripe → checkout.session.completed | payment_intent.succeeded</li>
+          <li>webhook → upsert on stripe_payment_intent_id (unique)</li>
+          <li>hosted Checkout fires BOTH — same row, written twice, one order</li>
+          <li>/orders → reads the table, never Stripe</li>
+        </ol>
+        <p className="mt-4 max-w-xl text-sm text-zinc-500">
+          Subscription syncing is idempotent by accident — it copies a state, so
+          running it twice is harmless. Fulfilling an order is not: ship on every
+          delivery and a Stripe retry ships twice. The unique constraint on the
+          PaymentIntent id is what makes the difference.{" "}
+          {user ? (
+            <Link href="/orders" className="underline">
+              See your orders
+            </Link>
+          ) : (
+            "Sign in to see your orders."
+          )}
+        </p>
 
         {/* ------------------------------- test cards ---------------------- */}
         <h2 className="mt-14 text-2xl font-semibold">Test cards</h2>

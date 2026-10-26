@@ -227,16 +227,32 @@ app/api/webhook/route.ts          syncs Stripe → Supabase
 
 ## One-off payment demos
 
-Separate from the subscription flow, no account needed — `mode: "payment"`
-instead of `"subscription"`:
+Separate from the subscription flow — `mode: "payment"` instead of
+`"subscription"`. Sign-in required, because each purchase is written to the
+`orders` table against a user id:
 
 - `/checkout` — hosted Checkout ([route](app/api/checkout-session/route.ts))
 - `/elements` — embedded Payment Element ([route](app/api/payment-intent/route.ts))
+- `/orders` — what the webhook wrote ([lib/fulfil-order.ts](lib/fulfil-order.ts))
+
+The same webhook fulfils these. A hosted Checkout fires **two** events for one
+purchase — `checkout.session.completed` and `payment_intent.succeeded` — and
+Stripe retries any delivery it didn't get a 2xx for, so both write the same row
+keyed on `stripe_payment_intent_id`, which is `unique`. Deliver the same event
+five times, still one order.
+
+Note that Checkout Session metadata is **not** copied onto the PaymentIntent.
+`payment_intent_data.metadata` is set explicitly so the second event can
+attribute the purchase on its own.
 
 ## Things worth internalising
 
 - **Never trust the client for money.** The browser posts `"monthly"`, not a
   price or an amount. The price id is resolved server-side in `lib/plans.ts`.
+- **Fulfilment must be idempotent; syncing gets it for free.** Copying a
+  subscription's current state twice is harmless. Shipping an order twice is
+  not, and webhooks are delivered at-least-once — so orders upsert on a unique
+  PaymentIntent id rather than inserting.
 - **The database is the gate, Stripe is the source.** `/premium` reads one
   indexed row instead of calling Stripe on every request; the webhook is what
   keeps that row true.

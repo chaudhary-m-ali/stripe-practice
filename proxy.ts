@@ -9,7 +9,9 @@ import { NextResponse, type NextRequest } from "next/server";
  *  1. Refresh the Supabase session and write the rotated cookies onto the
  *     response. Server Components can't set cookies, so without this the
  *     access token would expire and users would get logged out at random.
- *  2. Bounce signed-out visitors away from /premium and /account.
+ *  2. Bounce signed-out visitors away from the pages that need an account —
+ *     /premium, /account, and the one-off purchase pages, whose orders are
+ *     written against a user id.
  *
  * Note this only checks that you're LOGGED IN. Whether you're a paying
  * subscriber is checked in the page itself, against the database.
@@ -57,7 +59,9 @@ export async function proxy(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const path = request.nextUrl.pathname;
-  const isProtected = path.startsWith("/premium") || path.startsWith("/account");
+  const isProtected = ["/premium", "/account", "/orders", "/checkout", "/elements"].some(
+    (prefix) => path.startsWith(prefix),
+  );
 
   if (!user && isProtected) {
     const url = request.nextUrl.clone();

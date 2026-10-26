@@ -66,12 +66,16 @@ export default async function SuccessPage({
       </div>
 
       <p className="mt-6 text-sm text-zinc-500">
-        This page is for the buyer&apos;s benefit only. Fulfil the order from
-        the <code className="font-mono">checkout.session.completed</code>{" "}
-        webhook instead — the redirect can be lost if the browser is closed.
+        This page is for the buyer&apos;s benefit only — it fulfils nothing. The{" "}
+        <code className="font-mono">checkout.session.completed</code> webhook
+        wrote the order, which is why closing this tab before it loaded would
+        have changed nothing.
       </p>
 
       <div className="mt-8 flex gap-4">
+        <Link href="/orders" className="text-sm underline">
+          Your orders
+        </Link>
         <Link href="/checkout" className="text-sm underline">
           Buy something else
         </Link>

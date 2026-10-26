@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { stripe } from "@/lib/stripe";
 import { getProduct } from "@/lib/products";
+import { getOrCreateStripeCustomer } from "@/lib/stripe-customer";
+import { createClient } from "@/lib/supabase/server";
 
 /**
  * FLOW 2 — Payment Element (embedded).
@@ -11,6 +13,15 @@ import { getProduct } from "@/lib/products";
  */
 export async function POST(request: Request) {
   try {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      return NextResponse.json({ error: "Not signed in" }, { status: 401 });
+    }
+
     const { productId } = (await request.json()) as { productId?: string };
     const product = productId ? getProduct(productId) : undefined;
 
@@ -18,14 +29,24 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Unknown product" }, { status: 400 });
     }
 
+    const customerId = await getOrCreateStripeCustomer(user);
+
     const paymentIntent = await stripe.paymentIntents.create({
       amount: product.amount,
       currency: product.currency,
+      customer: customerId,
       // Lets Stripe decide which payment methods to show (card, Link, wallets…)
       // based on your Dashboard settings and the buyer's browser/location.
       automatic_payment_methods: { enabled: true },
       description: product.name,
-      metadata: { productId: product.id },
+      // The only place this purchase's identity lives — there's no Checkout
+      // Session here to carry a client_reference_id, so the webhook reads
+      // these off the payment_intent.succeeded event.
+      metadata: {
+        productId: product.id,
+        supabase_user_id: user.id,
+        source: "elements",
+      },
     });
 
     return NextResponse.json({

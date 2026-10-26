@@ -1,6 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import type { User } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
+import { unstable_rethrow } from "next/navigation";
 
 /**
  * True once NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY are set.
@@ -66,6 +67,8 @@ export async function getCurrentUser(): Promise<User | null> {
     } = await supabase.auth.getUser();
     return user;
   } catch (error) {
+    // Let Next's internal signals (e.g. "this route is dynamic") through.
+    unstable_rethrow(error);
     console.error(
       "[supabase] getUser failed:",
       error instanceof Error ? error.message : error,
